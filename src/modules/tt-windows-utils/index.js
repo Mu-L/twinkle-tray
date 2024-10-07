@@ -2,6 +2,7 @@
 const WindowUtils = require("bindings")("windows_window_utils");
 const PowerEvents = require("bindings")("windows_power_events");
 const MediaStatus = require("bindings")("windows_media_status");
+const WindowMaterial = require("bindings")("windows_window_material");
 
 module.exports = {
     WindowUtils: {
@@ -21,5 +22,20 @@ module.exports = {
     MediaStatus: {
         getPlaybackStatus: MediaStatus.getPlaybackStatus,
         getPlaybackInfo: MediaStatus.getPlaybackInfo
+    },
+    WindowMaterial: {
+        setWindowMaterial: (hwnd, materialType = 1, cornersType = 2, darkModeSupported = true) => {
+            WindowMaterial.setWindowMaterial(hwnd, materialType, cornersType, (darkModeSupported ? 1 : 0))
+        },
+        setWindowAttribute: WindowMaterial.setWindowAttribute,
+        setWindowCorners: (hwnd, cornerType = 0) => {
+            WindowMaterial.setWindowAttribute(hwnd, 33, cornerType)
+        },
+        setDarkModeSupported: (hwnd, enabled = 1) => {
+            WindowMaterial.setWindowAttribute(hwnd, 20, enabled)
+        },
+        setTransitionSupported: (hwnd, enabled = 1) => {
+            WindowMaterial.setWindowAttribute(hwnd, 3, enabled)
+        }
     }
 }

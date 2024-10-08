@@ -438,6 +438,7 @@ const defaultSettings = {
   monitorFeatures: {},
   monitorFeaturesSettings: {},
   hideDisplays: {},
+  hdrDisplays: {},
   checkForUpdates: !isDev,
   dismissedUpdate: '',
   language: "system",

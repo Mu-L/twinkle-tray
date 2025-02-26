@@ -17,8 +17,23 @@ struct Monitor {
     std::vector<HANDLE> physicalHandles;
 };
 
+struct MonitorHighLevel {
+    DWORD capabilities = 0;
+    DWORD capabilitiesOK = 0;
+    DWORD supportedTemperatures = 0;
+    DWORD brightness = 0;
+    DWORD brightnessMin = 0;
+    DWORD brightnessMax = 0;
+    DWORD brightnessOK = 0;
+    DWORD contrast = 0;
+    DWORD contrastMin = 0;
+    DWORD contrastMax = 0;
+    DWORD contrastOK = 0;
+};
+
 struct PhysicalMonitor {
     HANDLE handle;
+    bool handleIsValid;
     bool ddcciSupported;
     std::string name;
     std::string fullName;
@@ -26,6 +41,7 @@ struct PhysicalMonitor {
     std::string result;
     std::string deviceKey;
     std::string deviceID;
+    MonitorHighLevel hlCapabilities;
 };
 
 struct DisplayDevice {
@@ -50,7 +66,7 @@ int logLevel = 0;
 void
 p(std::string s)
 {
-    if(logLevel = 1) {
+    if(logLevel >= 1) {
         std::cout << "[node-ddcci] " + s << std::endl;
     }
 }
@@ -59,7 +75,7 @@ p(std::string s)
 void
 d(std::string s)
 {
-    if(logLevel = 2) {
+    if(logLevel >= 2) {
         std::cout << "[node-ddcci] " + s << std::endl;
     }
 }
@@ -82,6 +98,50 @@ clearMonitorData()
     if (!capabilities.empty()) {
         capabilities.clear();
     }
+}
+
+void
+cleanMonitorHandles(std::map<std::string, HANDLE> newHandles)
+{
+    if (!handles.empty()) {
+        for (auto const& handle : handles) {
+            bool found = false;
+            for (auto const& newHandle : newHandles) {
+                if (handle.second == newHandle.second) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                DestroyPhysicalMonitor(handle.second);
+                handles.erase(handle.first);
+            }
+        }
+        handles.clear();
+    }
+}
+
+std::string
+getLastErrorString()
+{
+    DWORD errorCode = GetLastError();
+    if (!errorCode) {
+        return std::string();
+    }
+
+    LPSTR buf = NULL;
+    DWORD size =
+      FormatMessage(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM
+                      | FORMAT_MESSAGE_IGNORE_INSERTS,
+                    NULL,
+                    errorCode,
+                    LANG_SYSTEM_DEFAULT,
+                    (LPSTR)&buf,
+                    0,
+                    NULL);
+
+    std::string message(buf, size);
+    return message;
 }
 
 std::string
@@ -194,6 +254,114 @@ getAllHandles() {
     return monitors;
 }
 
+MonitorHighLevel
+getHighLevelCapabilities(HANDLE handle) {
+    MonitorHighLevel monitor;
+
+    if(handle == NULL) {
+        d("No handle for capabilities data!");
+        return monitor;
+    }
+
+    // General capabilities
+    // Note: Displays that don't support color temperature seem to respond poorly to this function
+    /*
+    monitor.capabilitiesOK = GetMonitorCapabilities(handle, &monitor.capabilities, &monitor.supportedTemperatures);
+    d("== GetMonitorCapabilities: " + std::to_string(monitor.capabilitiesOK) + ": " + std::to_string(monitor.capabilities));
+
+    if(monitor.capabilitiesOK == 0) {
+        d("== Error: " + getLastErrorString());
+    }
+    */
+
+    // Brightness
+    monitor.brightnessOK = GetMonitorBrightness(handle, &monitor.brightnessMin, &monitor.brightness, &monitor.brightnessMax);
+    d("-- -- GetMonitorBrightness: " + std::to_string(monitor.brightnessOK) + ": " + std::to_string(monitor.brightness) + " (" + std::to_string(monitor.brightnessMin) + "-" + std::to_string(monitor.brightnessMax) + ")");
+
+    if(monitor.brightnessOK == 0) {
+        d("-- -- Error: " + getLastErrorString());
+    }
+
+    // Contrast
+    monitor.contrastOK = GetMonitorContrast(handle, &monitor.contrastMin, &monitor.contrast, &monitor.contrastMax);
+    d("-- -- GetMonitorContrast: " + std::to_string(monitor.contrastOK) + ": " + std::to_string(monitor.contrast) + " (" + std::to_string(monitor.contrastMin) + "-" + std::to_string(monitor.contrastMax) + ")");
+
+    if(monitor.contrastOK == 0) {
+        d("-- -- Error: " + getLastErrorString());
+    }
+
+    return monitor;
+}
+
+std::string
+getCapabilitiesString(HANDLE handle)
+{
+    DWORD cchStringLength = 0;
+    BOOL bSuccess = 0;
+
+    std::string returnString = "";
+
+    if(handle == NULL) {
+        d("No handle for capabilities string!");
+        return "";
+    }
+
+    if(handle != NULL) {
+        // Get the capabilities string length.
+        // Checking the capabilities string is, apparently, very flaky.
+        // So if it fails, we should try again.
+        int attempt = 0;
+        bSuccess = 0;
+        while (bSuccess != 1 && attempt < 3) {
+            if(attempt > 1) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            attempt++;
+            bSuccess = GetCapabilitiesStringLength(handle,
+              &cchStringLength);
+            d("== cLength attempt #" + std::to_string(attempt) + ": " + std::to_string(bSuccess));
+        }
+
+        if (bSuccess != 1) {
+            d("Couldn't get capabilities length!");
+            return ""; // Does not respond to DDC/CI
+        }
+    }
+
+    d("== cLength: " + std::to_string(cchStringLength));
+
+    // Allocate the string buffer.
+    LPSTR szCapabilitiesString = (LPSTR)malloc(cchStringLength);
+    if (szCapabilitiesString != NULL) {
+
+        // Get the capabilities string.
+        // We know it exists, so we'll try a few times if needed.
+        int attempt = 0;
+        bSuccess = 0;
+        while (bSuccess != 1 && attempt < 5) {
+            if(attempt > 1) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            attempt++;
+            bSuccess = CapabilitiesRequestAndCapabilitiesReply(
+              handle, szCapabilitiesString, cchStringLength);
+            d("== cString attempt #" + std::to_string(attempt) + ": " + std::to_string(bSuccess));
+        }
+
+        if (bSuccess != 1) {
+            d("Couldn't get capabilities string!");
+            return ""; // Does not respond to DDC/CI
+        }
+
+        returnString = std::string(szCapabilitiesString);
+
+        // Free the string buffer.
+        free(szCapabilitiesString);
+    }
+
+    return returnString;
+}
+
 // Test if HANDLE has a working DDC/CI connection.
 // Returns "invalid", "ok", or a capabilities string.
 std::string
@@ -206,36 +374,11 @@ getPhysicalHandleResults(HANDLE handle, std::string validationMethod)
 
     // Accurate method: Check capabilities string
     if (validationMethod == "accurate") {
-        DWORD cchStringLength = 0;
-        BOOL bSuccess = 0;
-        LPSTR szCapabilitiesString = NULL;
-
-        // Get the length of the string.
-        bSuccess = GetCapabilitiesStringLength(handle, // Handle to the monitor.
-                                               &cchStringLength);
-
-        if (bSuccess != 1) {
-            return "invalid"; // Does not respond to DDC/CI
+        std::string result = getCapabilitiesString(handle);
+        if(result == "") {
+            return "invalid";
         }
-
-        // Allocate the string buffer.
-        szCapabilitiesString = (LPSTR)malloc(cchStringLength);
-        if (szCapabilitiesString != NULL) {
-            // Get the capabilities string.
-            bSuccess = CapabilitiesRequestAndCapabilitiesReply(
-              handle, szCapabilitiesString, cchStringLength);
-
-            if (bSuccess != 1) {
-                return "invalid"; // This shouldn't happen
-            }
-
-            std::string capabilities = std::string(szCapabilitiesString);
-
-            // Free the string buffer before returning result.
-            free(szCapabilitiesString);
-            return capabilities;
-        }
-        return "invalid";
+        return result;
     }
 
     // Fast method: Check common VCP codes
@@ -246,18 +389,21 @@ getPhysicalHandleResults(HANDLE handle, std::string validationMethod)
     if (GetVCPFeatureAndVCPFeatureReply(
           handle, 0x02, NULL, &currentValue, &maxValue)) {
         bSuccess = 1;
+        return "ok";
     }
     // 0xDF, VCP Version
     if (!bSuccess
         && GetVCPFeatureAndVCPFeatureReply(
           handle, 0xDF, NULL, &currentValue, &maxValue)) {
         bSuccess = 1;
+        return "ok";
     }
     // 0x10, Brightness (usually)
     if (!bSuccess
         && GetVCPFeatureAndVCPFeatureReply(
           handle, 0x10, NULL, &currentValue, &maxValue)) {
         bSuccess = 1;
+        return "ok";
     }
 
     if (bSuccess == 0) {
@@ -395,11 +541,10 @@ populateHandlesMapLegacy()
 }
 
 void
-populateHandlesMapNormal(std::string validationMethod, bool usePreviousResults)
+populateHandlesMapNormal(std::string validationMethod, bool usePreviousResults, bool checkHighLevel)
 {
     std::map<std::string, HANDLE> newHandles;
     std::map<std::string, PhysicalMonitor> newPhysicalHandles;
-    std::map<std::string, std::string> newCapabilities;
 
     d("Getting all display devices...");
 
@@ -411,7 +556,7 @@ populateHandlesMapNormal(std::string validationMethod, bool usePreviousResults)
         d("-- -- deviceKey: " + display.second.deviceKey);
     }
     
-    d("Testing all physicalMonitors...");
+    p("Testing all physicalMonitors...");
 
     // Get physical monitor handles
     std::vector<struct Monitor> monitors = getAllHandles();
@@ -426,10 +571,11 @@ populateHandlesMapNormal(std::string validationMethod, bool usePreviousResults)
             std::string fullMonitorName =
               monitor.monitorName + "\\" + "Monitor" + std::to_string(i);
 
-            d("-- " + fullMonitorName);
+            p("-- " + fullMonitorName);
 
             PhysicalMonitor newMonitor;
             newMonitor.handle = monitor.physicalHandles[i];
+            newMonitor.handleIsValid = (newMonitor.handle != NULL);
             newMonitor.name = monitor.monitorName;
             newMonitor.physicalName = fullMonitorName;
             newMonitor.ddcciSupported = false;
@@ -456,7 +602,7 @@ populateHandlesMapNormal(std::string validationMethod, bool usePreviousResults)
                         newMonitor.deviceID = display.second.deviceID;
                         newMonitor.fullName = display.second.deviceName;
                         foundMatchingDisplay = true;
-                        d("-- -- Matched with: " + display.second.deviceKey);
+                        p("-- -- Matched with: " + display.second.deviceKey);
                         break;
                     }
                     foundCount++;
@@ -464,28 +610,73 @@ populateHandlesMapNormal(std::string validationMethod, bool usePreviousResults)
             }
 
             if(!foundMatchingDisplay) {
-                d("-- -- Couldn't find match. Skipping.");
+                p("-- -- Couldn't find match. Skipping.");
                 break;
             }
 
             // Check if monitor was previously tested and supported
             if(usePreviousResults) {
                 for (auto const& previousDisplay : physicalMonitorHandles) {
-                    if(previousDisplay.second.fullName == newMonitor.fullName && previousDisplay.second.deviceID == newMonitor.deviceID && previousDisplay.second.ddcciSupported) {
+                    if(previousDisplay.second.fullName == newMonitor.fullName && previousDisplay.second.deviceID == newMonitor.deviceID && previousDisplay.second.ddcciSupported && previousDisplay.second.result != "invalid") {
                         newMonitor.result = previousDisplay.second.result;
                         newMonitor.ddcciSupported = previousDisplay.second.ddcciSupported;
+                        
+                        // Test old handle if it's valid
+                        if(previousDisplay.second.handle != NULL && previousDisplay.second.handleIsValid) {
+                            p("-- -- Testing old handle.");
+                            if("ok" == getPhysicalHandleResults(previousDisplay.second.handle, "fast")) {
+                                p("-- -- Using old handle.");
+                                newMonitor.handle = previousDisplay.second.handle;
+                                newMonitor.handleIsValid = previousDisplay.second.handleIsValid;
+                                newMonitor.hlCapabilities = previousDisplay.second.hlCapabilities;
+                            }
+                        }
                         break;
                     }
                 }
             }
 
+            // Test high level capabilities
+            if((newMonitor.hlCapabilities.brightnessOK || newMonitor.hlCapabilities.contrastOK) == false) {
+                if(checkHighLevel) {
+                    p("-- -- High Level: Checking...");
+                    newMonitor.hlCapabilities = getHighLevelCapabilities(newMonitor.handle);
+                } else {
+                    p("-- -- High Level: Skipped");
+                }
+            }
+            if(newMonitor.hlCapabilities.brightnessOK || newMonitor.hlCapabilities.contrastOK) {
+                p("-- -- High Level: Supported");
+            }
+
             // Test DDC/CI
+            bool saveCapabilities = false;
             if (newMonitor.ddcciSupported == false) {
-                std::string result = getPhysicalHandleResults(
-                  newMonitor.handle, validationMethod);
+                std::string result = "invalid";
+                if (capabilities.find(newMonitor.deviceKey) == capabilities.end()) {
+                    // Capabilities string not found, read it
+
+                    // If "accurate", check "fast" first
+                    if(validationMethod == "accurate") {
+                        result = getPhysicalHandleResults(newMonitor.handle, "fast");
+                    }
+
+                    // Check results using requested method
+                    std::string validationMethodResult = getPhysicalHandleResults(newMonitor.handle, validationMethod);
+
+                    if(validationMethodResult != "invalid") {
+                        result = validationMethodResult;
+                    }
+
+                    saveCapabilities = true;
+                } else {
+                    // Reuse capabilities string
+                    result = capabilities.find(newMonitor.deviceKey)->second;
+                    p("-- -- Using previous capabilities string.");  
+                }
 
                 newMonitor.result = result;
-                d("-- -- DDC/CI: " + result);                
+                p("-- -- DDC/CI: " + result);                
 
                 if (result == "invalid") {
                     newMonitor.ddcciSupported = false;
@@ -493,7 +684,7 @@ populateHandlesMapNormal(std::string validationMethod, bool usePreviousResults)
                     newMonitor.ddcciSupported = true;
                 }
             } else {
-                d("-- -- DDC/CI: previously OK");
+                p("-- -- DDC/CI: previously OK");
             }
 
             // Add to monitor list
@@ -501,53 +692,29 @@ populateHandlesMapNormal(std::string validationMethod, bool usePreviousResults)
             newHandles.insert({ newMonitor.deviceKey, newMonitor.handle });
 
             // Add to capabilities list
-            if (validationMethod == "accurate" && newMonitor.result != "ok"
+            if (saveCapabilities && validationMethod == "accurate" && newMonitor.result != "ok"
                 && newMonitor.result != "invalid") {
-                newCapabilities.insert(
+                capabilities.insert(
                     { newMonitor.deviceKey, newMonitor.result });
             }
         }
     }
 
-    clearMonitorData();
+    cleanMonitorHandles(newHandles);
     handles = newHandles;
     physicalMonitorHandles = newPhysicalHandles;
-    capabilities = newCapabilities;
 }
 
 void
-populateHandlesMap(std::string validationMethod, bool usePreviousResults)
+populateHandlesMap(std::string validationMethod, bool usePreviousResults, bool checkHighLevel)
 {
     if (validationMethod == "legacy")
         return populateHandlesMapLegacy();
 
     if (validationMethod == "accurate" || validationMethod == "no-validation")
-        return populateHandlesMapNormal(validationMethod, usePreviousResults);
+        return populateHandlesMapNormal(validationMethod, usePreviousResults, checkHighLevel);
 
-    return populateHandlesMapNormal("fast", usePreviousResults);
-}
-
-std::string
-getLastErrorString()
-{
-    DWORD errorCode = GetLastError();
-    if (!errorCode) {
-        return std::string();
-    }
-
-    LPSTR buf = NULL;
-    DWORD size =
-      FormatMessage(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM
-                      | FORMAT_MESSAGE_IGNORE_INSERTS,
-                    NULL,
-                    errorCode,
-                    LANG_SYSTEM_DEFAULT,
-                    (LPSTR)&buf,
-                    0,
-                    NULL);
-
-    std::string message(buf, size);
-    return message;
+    return populateHandlesMapNormal("fast", usePreviousResults, checkHighLevel);
 }
 
 Napi::Value
@@ -555,15 +722,15 @@ refresh(const Napi::CallbackInfo& info)
 {
     Napi::Env env = info.Env();
 
-    if (info.Length() < 1) {
+    if (info.Length() < 2) {
         throw Napi::TypeError::New(env, "Not enough arguments");
     }
-    if (!info[0].IsString() || !info[1].IsBoolean()) {
+    if (!info[0].IsString() || !info[1].IsBoolean() || !info[2].IsBoolean()) {
         throw Napi::TypeError::New(env, "Invalid arguments");
     }
 
     try {
-        populateHandlesMap(info[0].As<Napi::String>().Utf8Value(), info[1].As<Napi::Boolean>().ToBoolean());
+        populateHandlesMap(info[0].As<Napi::String>().Utf8Value(), info[1].As<Napi::Boolean>().ToBoolean(), info[2].As<Napi::Boolean>().ToBoolean());
     } catch (std::runtime_error& e) {
         throw Napi::Error::New(env, e.what());
     }
@@ -583,9 +750,8 @@ clearDisplayCache(const Napi::CallbackInfo& info)
 }
 
 Napi::String
-getCapabilitiesString(const Napi::CallbackInfo& info)
+getNAPICapabilitiesString(const Napi::CallbackInfo& info)
 {
-
     Napi::Env env = info.Env();
 
     if (info.Length() < 1) {
@@ -603,37 +769,17 @@ getCapabilitiesString(const Napi::CallbackInfo& info)
         return Napi::String::New(env, found->second);
     }
 
+    // Find requested monitor.
     auto it = handles.find(monitorName);
     if (it == handles.end()) {
         throw Napi::Error::New(env, "Monitor not found");
     }
 
-    DWORD cchStringLength = 0;
-    BOOL bSuccess = 0;
-    LPSTR szCapabilitiesString = NULL;
+    std::string returnString = getCapabilitiesString(it->second);
 
-    std::string returnString = "";
-
-    // Get the length of the string.
-    bSuccess = GetCapabilitiesStringLength(it->second, // Handle to the monitor.
-                                           &cchStringLength);
-
-    if (bSuccess != 1) {
+    if(returnString == "") {
         throw Napi::Error::New(
           env, "Monitor not responding."); // Does not respond to DDC/CI
-    } else {
-        // Allocate the string buffer.
-        LPSTR szCapabilitiesString = (LPSTR)malloc(cchStringLength);
-        if (szCapabilitiesString != NULL) {
-            // Get the capabilities string.
-            bSuccess = CapabilitiesRequestAndCapabilitiesReply(
-              it->second, szCapabilitiesString, cchStringLength);
-
-            returnString = std::string(szCapabilitiesString);
-
-            // Free the string buffer.
-            free(szCapabilitiesString);
-        }
     }
 
     return Napi::String::New(env, returnString);
@@ -665,6 +811,12 @@ getAllMonitors(const Napi::CallbackInfo& info)
         Napi::Object monitor = Napi::Object::New(env);
         monitor.Set("ddcciSupported",
                     Napi::Boolean::New(env, handle.second.ddcciSupported));
+        monitor.Set("hlBrightnessSupported",
+                    Napi::Boolean::New(env, handle.second.hlCapabilities.brightnessOK));
+        monitor.Set("hlContrastSupported",
+                    Napi::Boolean::New(env, handle.second.hlCapabilities.contrastOK));
+        monitor.Set("handleIsValid",
+                    Napi::Boolean::New(env, handle.second.handleIsValid));
         monitor.Set("name", Napi::String::New(env, handle.second.name));
         monitor.Set("fullName", Napi::String::New(env, handle.second.fullName));
         monitor.Set("physicalName", Napi::String::New(env, handle.second.physicalName));
@@ -773,6 +925,140 @@ saveCurrentSettings(const Napi::CallbackInfo& info)
     return Napi::Boolean::New(env, bSuccess);
 }
 
+Napi::Value
+getHighLevelBrightness(const Napi::CallbackInfo& info)
+{
+    Napi::Env env = info.Env();
+
+    if (info.Length() < 1) {
+        throw Napi::TypeError::New(env, "Not enough arguments");
+    }
+    if (!info[0].IsString()) {
+        throw Napi::TypeError::New(env, "Invalid arguments");
+    }
+
+    std::string monitorName = info[0].As<Napi::String>().Utf8Value();
+
+    auto it = handles.find(monitorName);
+    if (it == handles.end()) {
+        throw Napi::Error::New(env, "Monitor not found");
+    }
+
+    DWORD minValue;
+    DWORD currentValue;
+    DWORD maxValue;
+    if (!GetMonitorBrightness(
+          it->second, &minValue, &currentValue, &maxValue)) {
+        throw Napi::Error::New(env,
+                               std::string("Failed to get high level brightness\n")
+                                 + getLastErrorString());
+    }
+
+    Napi::Array ret = Napi::Array::New(env, 3);
+    ret.Set((uint32_t)0, static_cast<double>(currentValue));
+    ret.Set((uint32_t)1, static_cast<double>(maxValue));
+    ret.Set((uint32_t)2, static_cast<double>(minValue));
+
+    return ret;
+}
+
+Napi::Value
+setHighLevelBrightness(const Napi::CallbackInfo& info)
+{
+    Napi::Env env = info.Env();
+
+    if (info.Length() < 2) {
+        throw Napi::TypeError::New(env, "Not enough arguments");
+    }
+    if (!info[0].IsString() || !info[1].IsNumber()) {
+        throw Napi::TypeError::New(env, "Invalid arguments");
+    }
+
+    std::string monitorName = info[0].As<Napi::String>().Utf8Value();
+    DWORD newValue =
+      static_cast<DWORD>(info[1].As<Napi::Number>().Int32Value());
+
+    auto it = handles.find(monitorName);
+    if (it == handles.end()) {
+        throw Napi::Error::New(env, "Monitor not found");
+    }
+
+    if (!SetMonitorBrightness(it->second, newValue)) {
+        throw Napi::Error::New(env,
+                               std::string("Failed to set high level brightness\n")
+                                 + getLastErrorString());
+    }
+
+    return env.Undefined();
+}
+
+Napi::Value
+getHighLevelContrast(const Napi::CallbackInfo& info)
+{
+    Napi::Env env = info.Env();
+
+    if (info.Length() < 1) {
+        throw Napi::TypeError::New(env, "Not enough arguments");
+    }
+    if (!info[0].IsString()) {
+        throw Napi::TypeError::New(env, "Invalid arguments");
+    }
+
+    std::string monitorName = info[0].As<Napi::String>().Utf8Value();
+
+    auto it = handles.find(monitorName);
+    if (it == handles.end()) {
+        throw Napi::Error::New(env, "Monitor not found");
+    }
+
+    DWORD minValue;
+    DWORD currentValue;
+    DWORD maxValue;
+    if (!GetMonitorContrast(
+          it->second, &minValue, &currentValue, &maxValue)) {
+        throw Napi::Error::New(env,
+                               std::string("Failed to get high level contrast\n")
+                                 + getLastErrorString());
+    }
+
+    Napi::Array ret = Napi::Array::New(env, 3);
+    ret.Set((uint32_t)0, static_cast<double>(currentValue));
+    ret.Set((uint32_t)1, static_cast<double>(maxValue));
+    ret.Set((uint32_t)2, static_cast<double>(minValue));
+
+    return ret;
+}
+
+Napi::Value
+setHighLevelContrast(const Napi::CallbackInfo& info)
+{
+    Napi::Env env = info.Env();
+
+    if (info.Length() < 2) {
+        throw Napi::TypeError::New(env, "Not enough arguments");
+    }
+    if (!info[0].IsString() || !info[1].IsNumber()) {
+        throw Napi::TypeError::New(env, "Invalid arguments");
+    }
+
+    std::string monitorName = info[0].As<Napi::String>().Utf8Value();
+    DWORD newValue =
+      static_cast<DWORD>(info[1].As<Napi::Number>().Int32Value());
+
+    auto it = handles.find(monitorName);
+    if (it == handles.end()) {
+        throw Napi::Error::New(env, "Monitor not found");
+    }
+
+    if (!SetMonitorContrast(it->second, newValue)) {
+        throw Napi::Error::New(env,
+                               std::string("Failed to set high level contrast\n")
+                                 + getLastErrorString());
+    }
+
+    return env.Undefined();
+}
+
 void
 setLogLevel(const Napi::CallbackInfo& info) {
     Napi::Env env = info.Env();
@@ -802,11 +1088,17 @@ Init(Napi::Env env, Napi::Object exports)
     exports.Set("getVCP", Napi::Function::New(env, getVCP, "getVCP"));
     exports.Set(
       "getCapabilitiesString",
-      Napi::Function::New(env, getCapabilitiesString, "getCapabilitiesString"));
+      Napi::Function::New(env, getNAPICapabilitiesString, "getCapabilitiesString"));
     exports.Set(
       "saveCurrentSettings",
       Napi::Function::New(env, saveCurrentSettings, "saveCurrentSettings"));
+    exports.Set("getHighLevelBrightness", Napi::Function::New(env, getHighLevelBrightness, "getHighLevelBrightness"));
+    exports.Set("setHighLevelBrightness", Napi::Function::New(env, setHighLevelBrightness, "setHighLevelBrightness"));
+    exports.Set("getHighLevelContrast", Napi::Function::New(env, getHighLevelContrast, "getHighLevelContrast"));
+    exports.Set("setHighLevelContrast", Napi::Function::New(env, setHighLevelContrast, "setHighLevelContrast"));
     exports.Set("setLogLevel", Napi::Function::New(env, setLogLevel, "setLogLevel"));
+
+    getAllHandles(); // Returns bad handles the first time??
 
     return exports;
 }

@@ -27,14 +27,14 @@ export default class BrightnessPanel extends PureComponent {
         let lastValidMonitor
         for(const key in this.state.monitors) {
           const monitor = this.state.monitors[key]
-          if(monitor.type == "wmi" || (monitor.type == "ddcci" && monitor.brightnessType)) {
+          if(monitor.type == "wmi" || monitor.type == "studio-display" || (monitor.type == "ddcci" && monitor.brightnessType)) {
            lastValidMonitor = monitor 
           }
         }
         if(lastValidMonitor) {
           const monitor = lastValidMonitor
           return (
-            <Slider name={T.t("GENERIC_ALL_DISPLAYS")} id={monitor.id} level={monitor.brightness} min={0} max={100} num={monitor.num} monitortype={monitor.type} hwid={monitor.key} key={monitor.key} onChange={this.handleChange} />
+            <Slider name={T.t("GENERIC_ALL_DISPLAYS")} id={monitor.id} level={monitor.brightness} min={0} max={100} num={monitor.num} monitortype={monitor.type} hwid={monitor.key} key={monitor.key} onChange={this.handleChange} scrollAmount={window.settings?.scrollFlyoutAmount} />
           )
         }
         return (<div className="no-displays-message">{T.t("GENERIC_NO_COMPATIBLE_DISPLAYS")}</div>)
@@ -70,7 +70,7 @@ export default class BrightnessPanel extends PureComponent {
           if (monitor.type == "none" || window.settings?.hideDisplays?.[monitor.key] === true) {
             return (<div key={monitor.key}></div>)
           } else {
-            if (monitor.type == "wmi" || (monitor.type == "ddcci" && monitor.brightnessType)) {
+            if (monitor.type == "wmi" || monitor.type == "studio-display" || (monitor.type == "ddcci" && monitor.brightnessType)) {
 
               let hasFeatures = true
               let featureCount = 0
@@ -91,17 +91,20 @@ export default class BrightnessPanel extends PureComponent {
               }
               const powerOff = () => {
                 window.ipc.send("sleep-display", monitor.hwid.join("#"))
+                monitor.features["0xD6"][0] = (monitor.features["0xD6"][0] >= 4 ? 1 : settings.ddcPowerOffValue)
+                this.forceUpdate()
               }
               const showPowerButton = () => {
-                if(monitorFeatures?.["0xD6"] && monitor.features?.["0xD6"]) {
-                  return (<div className="feature-power-icon simple" onClick={powerOff}><span className="icon vfix">&#xE7E8;</span><span>{T.t("PANEL_LABEL_TURN_OFF")}</span></div>)
+                const customFeatureEnabled = window.settings?.monitorFeaturesSettings?.[monitor?.hwid[1]]?.["0xD6"]
+                if(monitorFeatures?.["0xD6"] && (monitor.features?.["0xD6"] || customFeatureEnabled)) {
+                  return (<div className="feature-power-icon simple" onClick={powerOff}><span className="icon vfix">&#xE7E8;</span><span>{(monitor.features?.["0xD6"][0] >= 4 ? T.t("PANEL_LABEL_TURN_ON") : T.t("PANEL_LABEL_TURN_OFF"))}</span></div>)
                 }
               }
 
               if (!useFeatures || !hasFeatures) {
                 return (
                   <div className="monitor-sliders" key={monitor.key}>
-                    <Slider name={this.getMonitorName(monitor, this.state.names)} id={monitor.id} level={monitor.brightness} min={0} max={100} num={monitor.num} monitortype={monitor.type} hwid={monitor.key} key={monitor.key} onChange={this.handleChange} afterName={showPowerButton()} />
+                    <Slider name={this.getMonitorName(monitor, this.state.names)} id={monitor.id} level={monitor.brightness} min={0} max={100} num={monitor.num} monitortype={monitor.type} hwid={monitor.key} key={monitor.key} onChange={this.handleChange} afterName={showPowerButton()} scrollAmount={window.settings?.scrollFlyoutAmount} />
                   </div>
                 )
               } else {
@@ -116,9 +119,9 @@ export default class BrightnessPanel extends PureComponent {
                     </div>
                     <div className="feature-row feature-brightness">
                       <div className="feature-icon"><span className="icon vfix">&#xE706;</span></div>
-                      <Slider id={monitor.id} level={monitor.brightness} min={0} max={100} num={monitor.num} monitortype={monitor.type} hwid={monitor.key} key={monitor.key} onChange={this.handleChange} />
+                      <Slider id={monitor.id} level={monitor.brightness} min={0} max={100} num={monitor.num} monitortype={monitor.type} hwid={monitor.key} key={monitor.key} onChange={this.handleChange} scrollAmount={window.settings?.scrollFlyoutAmount} />
                     </div>
-                    <DDCCISliders monitor={monitor} monitorFeatures={monitorFeatures} />
+                    <DDCCISliders monitor={monitor} monitorFeatures={monitorFeatures} scrollAmount={window.settings?.scrollFlyoutAmount} />
                   </div>
                 )
               }
@@ -382,7 +385,7 @@ export default class BrightnessPanel extends PureComponent {
 
     window.addEventListener("monitorsUpdated", this.recievedMonitors)
     window.addEventListener("settingsUpdated", this.recievedSettings)
-    window.addEventListener("localizationUpdated", (e) => { T.setLocalizationData(e.detail.desired, e.detail.default) })
+    window.addEventListener("localizationUpdated", (e) => { T.setLocalizationData(e.detail.desired, e.detail.default); this.forceUpdate(); })
     window.addEventListener("updateUpdated", this.recievedUpdate)
     window.addEventListener("sleepUpdated", this.recievedSleep)
     window.addEventListener("isRefreshing", (e) => {

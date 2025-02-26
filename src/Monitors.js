@@ -4,10 +4,22 @@ console.log = (...args) => { args.unshift(tag); oLog(...args) }
 console.log("Monitors.js starting. If you see this again, something bad happened!")
 const w32disp = require("win32-displayconfig");
 const wmibridge = require("wmi-bridge");
+const hdr = require("windows-hdr");
 const { exec } = require('child_process');
 require("os").setPriority(0, require("os").constants.priority.PRIORITY_BELOW_NORMAL)
 
+let lastDDCCIList = []
+let lastRefresh = {}
+let lastWin32 = {}
+let lastWMI = {}
 
+function deepCopy(obj) {
+    try {
+        return JSON.parse(JSON.stringify(obj))
+    } catch(e) {
+        return false
+    }
+}
 
 process.on('message', async (data) => {
     try {
@@ -15,8 +27,10 @@ process.on('message', async (data) => {
             if(data.clearCache) {
                 vcpCache = {}
                 monitorReports = {}
+                monitorReportsRaw = {}
             }
             refreshMonitors(data.fullRefresh, data.ddcciType).then((results) => {
+                lastRefresh = deepCopy(results)
                 process.send({
                     type: 'refreshMonitors',
                     monitors: results
@@ -24,10 +38,13 @@ process.on('message', async (data) => {
             })
         } else if (data.type === "brightness") {
             setBrightness(data.brightness, data.id)
+        }  else if (data.type === "sdr") {
+            setSDRBrightness(data.brightness, data.id)
         } else if (data.type === "settings") {
             settings = data.settings
 
             // Overrides
+            if (settings?.disableAppleStudio) appleStudioUnavailable = true;
             if (settings?.disableWMIC) wmicUnavailable = true;
             if (settings?.disableWMI) wmiFailed = true;
             if (settings?.disableWin32) win32Failed = true;
@@ -41,8 +58,10 @@ process.on('message', async (data) => {
         } else if (data.type === "flushvcp") {
             vcpCache = {}
             monitorReports = {}
+            monitorReportsRaw = {}
+            ddcci._clearDisplayCache()
         } else if (data.type === "wmi-bridge-ok") {
-            canUseWmiBridge = true
+            canUseWmiBridge = data.value
         } else if (data.type === "getVCP") {
             getDDCCI()
             const vcp = await checkVCP(data.monitor, data.code)
@@ -50,7 +69,21 @@ process.on('message', async (data) => {
                 type: `getVCP::${data.monitor}::${data.code}`,
                 monitor: data.monitor,
                 code: data.code,
-                value: vcp?.[0]
+                value: vcp
+            })
+        } else if (data.type === "getReport") {
+            process.send({
+                type: `getReport`,
+                report: {
+                    lastDDCCIList,
+                    lastWMI,
+                    lastWin32,
+                    monitorsAppleStudio,
+                    monitorReports,
+                    monitorReportsRaw,
+                    lastRefresh,
+                    settings
+                }
             })
         }
     } catch (e) {
@@ -63,8 +96,10 @@ let skipTest = (process.argv.indexOf("--skiptest=true") >= 0)
 
 let monitors = false
 let monitorNames = []
+let monitorsAppleStudio = {}
 let monitorsWin32 = {}
 let monitorReports = {}
+let monitorReportsRaw = {}
 
 let settings = { order: [] }
 let localization = {}
@@ -91,7 +126,7 @@ refreshMonitors = async (fullRefresh = false, ddcciType = "default", alwaysSendU
             try {
                 if (settings?.getDDCBrightnessUpdates) {
                     if(!getDDCCI()) {
-                        ddcci._refresh(determineDDCCIMethod())
+                        ddcci._refresh(determineDDCCIMethod(), true, !settings.disableHighLevel)
                     }
                     for (const hwid2 in monitors) {
                         if (monitors[hwid2].type === "ddcci" && monitors[hwid2].brightnessType) {
@@ -141,6 +176,28 @@ refreshMonitors = async (fullRefresh = false, ddcciType = "default", alwaysSendU
                     console.log(`getBrightnessWMI() Total: ${(startTime - process.hrtime.bigint()) / BigInt(-1000000)}ms`)
                 } catch (e) {
                     console.log("\x1b[41m" + "getBrightnessWMI() failed!" + "\x1b[0m", e)
+                }
+            }
+
+            // Apple Studio displays
+            if (!appleStudioUnavailable) {
+                try {
+                    startTime = process.hrtime.bigint()
+                    monitorsAppleStudio = await getStudioDisplay(monitors);
+                    console.log(`getStudioDisplay() Total: ${(startTime - process.hrtime.bigint()) / BigInt(-1000000)}ms`)
+                } catch (e) {
+                    console.log("\x1b[41m" + "getStudioDisplay() failed!" + "\x1b[0m", e)
+                }
+            }
+
+            // HDR
+            if (settings.enableHDR) {
+                try {
+                    startTime = process.hrtime.bigint()
+                    monitorsHDR = await getHDRDisplays(monitors);
+                    console.log(`getHDRDisplays() Total: ${(startTime - process.hrtime.bigint()) / BigInt(-1000000)}ms`)
+                } catch (e) {
+                    console.log("\x1b[41m" + "getHDRDisplays() failed!" + "\x1b[0m", e)
                 }
             }
 
@@ -213,6 +270,20 @@ getAllMonitors = async (ddcciMethod = "default") => {
         console.log("getMonitorsWin32() skipped due to previous failure.")
     }
 
+    // List Apple Studio displays
+    if (!appleStudioUnavailable) {
+        try {
+            startTime = process.hrtime.bigint()
+            monitorsAppleStudio = await getStudioDisplay(foundMonitors);
+            console.log(`getStudioDisplay() Total: ${(startTime - process.hrtime.bigint()) / BigInt(-1000000)}ms`)
+        } catch (e) {
+            console.log("\x1b[41m" + "getStudioDisplay() failed!" + "\x1b[0m", e)
+        }
+    } else {
+        console.log("getStudioDisplay() skipped due to previous failure.")
+    }
+    
+
     // DDC/CI Brightness + Features
     try {
         startTime = process.hrtime.bigint()
@@ -220,13 +291,8 @@ getAllMonitors = async (ddcciMethod = "default") => {
 
         for (const hwid2 in featuresList) {
             const monitor = featuresList[hwid2]
-            const { features, id, hwid, vcpCodes, path, ddcciSupported } = monitor
-            let brightnessType = (features["0x10"] ? 0x10 : (features["0x13"] ? 0x13 : 0x00))
-
-            // Use DDC Brightness overrides, if relevant
-            if (typeof ddcBrightnessVCPs === "object" && Object.keys(ddcBrightnessVCPs).indexOf(hwid[1]) > -1) {
-                brightnessType = ddcBrightnessVCPs[hwid[1]]
-            }
+            const { features, id, hwid, vcpCodes, path, ddcciSupported, highLevelSupported } = monitor
+            const brightnessType = await determineBrightnessVCPCode(id)
 
             let ddcciInfo = {
                 id: id,
@@ -234,20 +300,32 @@ getAllMonitors = async (ddcciMethod = "default") => {
                 hwid,
                 path,
                 ddcciSupported,
+                highLevelSupported,
                 features: features,
                 vcpCodes: vcpCodes,
-                type: (ddcciSupported && brightnessType ? "ddcci" : "none"),
+                type: ((ddcciSupported || highLevelSupported?.brightness) && brightnessType ? "ddcci" : "none"),
                 min: 0,
                 max: 100,
                 brightnessType: brightnessType,
-                brightnessValues: (features[brightnessType] ? features[brightnessType] : features["0x10"] ? features["0x10"] : (features["0x13"] ? features["0x13"] : [50, 100]))
+                brightnessValues: (features[brightnessType] ? features[brightnessType] : [50, 100])
             }
 
-            const brightness = await checkVCP(id, parseInt(brightnessType))
+            let brightness;
+            if(!settings.disableHighLevel && monitor.highLevelSupported?.brightness && !(brightnessType > 0x10)) {
+                brightness = await getHighLevelBrightness(id)
+            } else {
+                brightness = await checkVCP(id, parseInt(brightnessType))
+            }
+            
+            // Force lower max brightness for testing
+            if(brightness?.[1]) {
+                if(settings.debugForceBrightnessMax) brightness[1] = settings.debugForceBrightnessMax
+            }
+
             if(brightness) {
                 ddcciInfo.brightnessValues = brightness
-                features[brightnessType] = brightness
-            }
+                features[vcpStr(brightnessType)] = brightness
+            }       
 
             ddcciInfo.brightnessRaw = ddcciInfo.brightnessValues[0]
             ddcciInfo.brightnessMax = ddcciInfo.brightnessValues[1]
@@ -305,6 +383,17 @@ getAllMonitors = async (ddcciMethod = "default") => {
         console.log("getBrightnessWMI() skipped due to previous failure.")
     }
 
+    // HDR
+    if (settings.enableHDR) {
+        try {
+            startTime = process.hrtime.bigint()
+            monitorsHDR = await getHDRDisplays(foundMonitors);
+            console.log(`getHDRDisplays() Total: ${(startTime - process.hrtime.bigint()) / BigInt(-1000000)}ms`)
+        } catch (e) {
+            console.log("\x1b[41m" + "getHDRDisplays() failed!" + "\x1b[0m", e)
+        }
+    }
+
     // Hide internal
     if (settings?.hideClosedLid) {
         const wmiMonitor = Object.values(foundMonitors).find(mon => mon.type === "wmi")
@@ -341,6 +430,75 @@ function determineDDCCIMethod() {
         ddcciMethod = savedMethod
     } 
     return ddcciMethod
+}
+
+let appleStudioUnavailable = false
+getStudioDisplay = async (monitors) => {
+    try {
+        const sdctl = require("studio-display-control")
+        const displays = {}
+        let count = 0
+        for (const display of sdctl.getDisplays()) {
+            const serial = await display.getSerialNumber();
+            const hwid = [
+                "\\\\?\\DISPLAY",
+                "APPAE3A",
+                `APLSTD-${serial}-NUM${count}`
+            ]
+            updateDisplay(monitors, hwid[2], {
+                name: "Apple Studio Display",
+                type: "studio-display",
+                key: hwid[2],
+                id: `\\\\?\\${hwid[0]}#${hwid[1]}#${hwid[2]}`,
+                hwid,
+                serial,
+                brightness: await display.getBrightness()
+            });
+            displays[hwid[2]] = display
+            count++
+        }
+        return displays
+    } catch (e) {
+        console.log("\x1b[41m" + "getStudioDisplay(): failed to access Studio Display" + "\x1b[0m", e)
+    }
+    return {}
+}
+
+setStudioDisplayBrightness = async (serial, brightness) => {
+    try {
+        const sdctl = require("studio-display-control")
+        for (const monitor of sdctl.getDisplays()) {
+            const s = await monitor.getSerialNumber();
+            if (s === serial) {
+                await monitor.setBrightness(brightness);
+            }
+        }
+    } catch (e) {
+        console.log("\x1b[41m" + "setStudioDisplayBrightness(): failed to set brightness" + "\x1b[0m", e)
+    }
+}
+
+getHDRDisplays = async (monitors) => {
+    try {
+        const displays = hdr.getDisplays()
+        for(const display of displays) {
+            const hwid = display.path.split("#")
+            updateDisplay(monitors, hwid[2], {
+                name: display.name,
+                key: hwid[2],
+                id: display.path,
+                hwid,
+                sdrNits: display.nits,
+                sdrLevel: parseInt((display.nits - 80) / 4),
+                hdr: "supported"
+            });
+            displays[hwid[2]] = display
+        }
+    } catch(e) {
+        console.log("\x1b[41m" + "getHDRDisplays(): failed to access displays" + "\x1b[0m", e)
+    }
+
+    return monitors
 }
 
 let wmiFailed = false
@@ -385,6 +543,7 @@ getMonitorsWMI = () => {
             console.log(`getMonitorsWMI: Failed to get all monitors.`)
             console.log(e)
         }
+        lastWMI = deepCopy(foundMonitors)
         resolve(foundMonitors)
     })
 }
@@ -429,16 +588,14 @@ getMonitorsWin32 = () => {
 
             // Return prepared results
             clearTimeout(timeout)
-            resolve(foundDisplays)
         } catch (e) {
-            console.log(`getMonitorsWin32: Failed to get all monitors. (L2)`)
-            console.log(e)
-            resolve(foundDisplays)
+            console.log(`getMonitorsWin32: Failed to get all monitors. (L2)`, e)
         }
+        lastWin32 = deepCopy(foundDisplays)
+        resolve(foundDisplays)
     })
 }
 
-let lastDDCCIList = []
 getFeaturesDDC = (ddcciMethod = "accurate") => {
     const monitorFeatures = {}
     return new Promise(async (resolve, reject) => {
@@ -447,14 +604,38 @@ getFeaturesDDC = (ddcciMethod = "accurate") => {
             
             getDDCCI()
             await wait(10)
-            const ddcciMonitors = ddcci.getAllMonitors(ddcciMethod)
+
+            // Sometimes the handles returned are NULL, so we should try again.
+            let tmpDdcciMonitors = ddcci.getAllMonitors(ddcciMethod, true, !settings.disableHighLevel)
+            if(tmpDdcciMonitors) {
+                let doRetry = false
+                for(const monitor of tmpDdcciMonitors) {
+                    if(monitor.handleIsValid === false) {
+                        doRetry = monitor
+                        break
+                    }
+                }
+                if(doRetry) {
+                    console.log(`DDC/CI results contain a null handle (${doRetry?.deviceKey}). Trying again.`)
+                    await wait(200)
+                    tmpDdcciMonitors = ddcci.getAllMonitors(ddcciMethod, true, !settings.disableHighLevel)
+                    for(const monitor of tmpDdcciMonitors) {
+                        if(monitor.handleIsValid === false) {
+                            console.log(`DDC/CI results still contain a null handle (${doRetry?.deviceKey}). Continuing anyway.`)
+                            break
+                        }
+                    }
+                }
+            }
+
+            const ddcciMonitors = tmpDdcciMonitors
             lastDDCCIList = ddcciMonitors
 
             for (let monitor of ddcciMonitors) {
                 const id = monitor.deviceKey
                 const featureTimeout = setTimeout(() => { console.log("getFeaturesDDC Timed out on monitor:", id); reject({}) }, 15000)
                 const hwid = id.split("#")
-                let features = []
+                let features = {}
 
                 // Apply capabilities report, if available.
                 if(monitor.capabilities && !monitorReports[id]) {
@@ -463,7 +644,7 @@ getFeaturesDDC = (ddcciMethod = "accurate") => {
 
                 if(monitor.ddcciSupported) {
                     await wait(10)
-                    features = await checkMonitorFeatures(id, false)
+                    features = await checkMonitorFeatures(id, false, ddcciMethod)
                 }
 
                 monitorFeatures[hwid[2]] = {
@@ -471,8 +652,12 @@ getFeaturesDDC = (ddcciMethod = "accurate") => {
                     hwid,
                     features,
                     ddcciSupported: monitor.ddcciSupported,
+                    highLevelSupported: {
+                        brightness: monitor.hlBrightnessSupported,
+                        contrast: monitor.hlContrastSupported
+                    },
                     path: monitor.fullName,
-                    vcpCodes: (monitorReports[id] ? Object.keys(monitorReports[id]) : [] )
+                    vcpCodes: (monitorReports[id] ? monitorReports[id] : {} )
                 }
                 clearTimeout(featureTimeout)
             }
@@ -486,7 +671,7 @@ getFeaturesDDC = (ddcciMethod = "accurate") => {
     })
 }
 
-checkMonitorFeatures = async (monitor, skipCache = false) => {
+checkMonitorFeatures = async (monitor, skipCache = false, ddcciMethod = "accurate") => {
     return new Promise(async (resolve, reject) => {
         const features = {}
         try {
@@ -494,42 +679,74 @@ checkMonitorFeatures = async (monitor, skipCache = false) => {
 
             // Detect valid VCP codes for display if not already available
             try {
-                if(!monitorReports[monitor]) {
-                    const report = ddcci.getCapabilities(monitor)
-                    if(Object.keys(report)?.length) {
-                        monitorReports[monitor] = report
+                if(ddcciMethod === "accurate" && !monitorReports[monitor]) {
+                    const reportRaw = ddcci.getCapabilitiesRaw(monitor)
+                    if(reportRaw) {
+                        monitorReportsRaw[monitor] = reportRaw
+                        const report = ddcci._parseCapabilitiesString(reportRaw)
+                        if(report && Object.keys(report)?.length > 0) {
+                            monitorReports[monitor] = report
+                        }
                     }
                 }
             } catch(e) {
                 console.log("Couldn't get capabilities report for monitor " + monitor)
             }
 
-            // Get custom DDC/CI features
-            const settingsFeatures = settings?.monitorFeatures?.[hwid[1]]
-            if(settingsFeatures) {
-                for(const vcp in settingsFeatures) {
-                    if(ddcBrightnessVCPs[hwid[1]] && vcp == ddcBrightnessVCPs[hwid[1]]) {
-                        continue; // Skip if custom brightness
-                    }
-                    if(settingsFeatures[vcp]) {
-                        features[vcp] = await checkVCPIfEnabled(monitor, parseInt(vcp), vcp, true)
+            let getAllValues = false
+            if(getAllValues && monitorReports[monitor]) {
+                for(const code in monitorReports[monitor]) {
+                    features[vcpStr(code)] = await checkVCP(monitor, code)
+                }
+            } else {
+                // Get custom DDC/CI features
+                const settingsFeatures = settings?.monitorFeatures?.[hwid[1]]
+                if(settingsFeatures) {
+                    for(const vcp in settingsFeatures) {
+                        if(ddcBrightnessVCPs[hwid[1]] && vcp == ddcBrightnessVCPs[hwid[1]]) {
+                            continue; // Skip if custom brightness
+                        }
+                        if(settingsFeatures[vcp]) {
+                            features[vcpStr(vcp)] = await checkVCPIfEnabled(monitor, parseInt(vcp), vcp, skipCache)
+                        }
                     }
                 }
+                
+                // Capabilities report allows us to skip this for unsupported codes, generally
+                features["0x10"] = await checkVCPIfEnabled(monitor, 0x10, "luminance", skipCache)
+                features["0x13"] = await checkVCPIfEnabled(monitor, 0x13, "brightness", skipCache)
+                features["0x12"] = await checkVCPIfEnabled(monitor, 0x12, "contrast", skipCache)
+                features["0xD6"] = await checkVCPIfEnabled(monitor, 0xD6, "powerState", skipCache)
+                features["0x62"] = await checkVCPIfEnabled(monitor, 0x62, "volume", skipCache)
             }
-            
-            // This part is flaky, so we'll do it slowly
-            // Capabilities report allows us to skip this, thankfully
-            features["0x10"] = await checkVCPIfEnabled(monitor, 0x10, "luminance", skipCache)
-            features["0x13"] = await checkVCPIfEnabled(monitor, 0x13, "brightness", skipCache)
-            features["0x12"] = await checkVCPIfEnabled(monitor, 0x12, "contrast", skipCache)
-            features["0xD6"] = await checkVCPIfEnabled(monitor, 0xD6, "powerState", skipCache)
-            features["0x62"] = await checkVCPIfEnabled(monitor, 0x62, "volume", skipCache)
+
+
             
         } catch (e) {
             console.log(e)
         }
         resolve(features)
     })
+}
+
+determineBrightnessVCPCode = async (monitor) => {
+    const hwid = monitor.split("#")
+    if(ddcBrightnessVCPs?.[hwid[1]]) {
+        return parseInt(ddcBrightnessVCPs[hwid[1]])
+    }
+    if(await checkIfVCPSupported(monitor, 0x10)) {
+        return 0x10 // luminance
+    }
+    if(await checkIfVCPSupported(monitor, 0x13)) {
+        return 0x13 // brightness
+    }
+    if(await checkIfVCPSupported(monitor, 0x6B)) {
+        return 0x6b // backlight level white
+    }
+    if(await checkIfVCPSupported(monitor, 0x12)) {
+        return 0x12 // contrast
+    }
+    return false
 }
 
 getBrightnessWMI = () => {
@@ -624,7 +841,7 @@ getBrightnessDDC = (monitorObj) => {
                         continue; // Skip brightness
                     }
                     if(settingsFeatures[vcp]) {
-                        monitor.features[vcp] = await checkVCP(monitor.id, parseInt(vcp))
+                        monitor.features[vcpStr(vcp)] = await checkVCP(monitor.id, parseInt(vcp))
                     }
                 }
             }
@@ -662,12 +879,35 @@ updateDisplay = (monitors, hwid2, info = {}) => {
     return true
 }
 
+function setSDRBrightness(brightness, id) {
+    if(!settings.enableHDR) return false;
+    try {
+        console.log("sdr", brightness, id)
+        hdr.setSDRBrightness(id, (brightness * 0.01 * 400) + 80)
+    } catch(e) {
+        console.log(`Couldn't update SDR brightness! [${id}]`, e);
+    }
+}
+
 function setBrightness(brightness, id) {
     try {
         if (id) {
             let monitor = Object.values(monitors).find(mon => mon.id?.indexOf(id) >= 0)
-            monitor.brightness = brightness
-            setVCP(monitor.hwid.join("#"), monitor.brightnessType, brightness)
+            if(monitor) {
+                monitor.brightness = brightness
+                if (monitor.type == "studio-display") {
+                    setStudioDisplayBrightness(monitor.serial, brightness)
+                } else if(!settings.disableHighLevel && monitor.highLevelSupported?.brightness) {
+                    setHighLevelBrightness(monitor.hwid.join("#"), brightness)
+                } else {
+                    setVCP(monitor.hwid.join("#"), monitor.brightnessType, brightness)
+                }
+                // Update tracked brightness values
+                const brightnessRaw = parseInt(brightness)
+                monitor.brightness = brightnessRaw * (100 / (monitor.brightnessMax || 100))
+                monitor.brightnessRaw = brightnessRaw
+                if(monitor.brightnessValues) monitor.brightnessValues[0] = brightnessRaw;
+            }
         } else {
             let monitor = Object.values(monitors).find(mon => mon.type == "wmi")
             monitor.brightness = brightness
@@ -717,6 +957,26 @@ async function checkVCPIfEnabled(monitor, code, setting, skipCache = false) {
     }
 }
 
+async function checkIfVCPSupported(monitor, code) {
+    const vcpString = vcpStr(code)
+    if(!code || code == "0x0") return false;
+    try {
+        const isInReport = monitorReports[monitor]?.[vcpString] ? true : false
+        const hasReport = monitorReports[monitor] && Object.keys(monitorReports[monitor])?.length > 0 ? true : false
+        
+        if (hasReport && !isInReport) return false;
+
+        // If we previously saw that a feature was supported, we shouldn't have to check again.
+        if (vcpCache[monitor] && vcpCache[monitor]["vcp_" + vcpString]) return true;
+
+        const vcpResult = await checkVCPIfEnabled(monitor, code)
+        return (vcpResult ? true : false)
+    } catch (e) {
+        console.log(`Error checking VCP code support ${vcpString} for ${monitor}`, e)
+        return false
+    }
+}
+
 async function checkVCP(monitor, code, skipCacheWrite = false) {
     const vcpString = vcpStr(code)
     if(!code || code == "0x0") return false;
@@ -726,7 +986,8 @@ async function checkVCP(monitor, code, skipCacheWrite = false) {
             if (!vcpCache[monitor]) vcpCache[monitor] = {};
             vcpCache[monitor]["vcp_" + vcpString] = result
         }
-        await wait(20)
+        if(settings.debugForceBrightnessMax && vcpString == "0x10") result[1] = settings.debugForceBrightnessMax; // Force lower max brightness for testing
+        await wait(parseInt(settings?.checkVCPWaitMS || 20))
         return result
     } catch (e) {
         let reason = e
@@ -759,6 +1020,27 @@ async function setVCP(monitor, code, value) {
         }
         return result
     } catch (e) {
+        return false
+    }
+}
+
+async function getHighLevelBrightness(monitor) {   
+    try {
+        let result = ddcci._getHighLevelBrightness(monitor)
+        return result
+    } catch (e) {
+        console.log(e)
+        return false
+    }
+}
+
+async function setHighLevelBrightness(monitor, value) {
+    if(busyLevel > 0) while(busyLevel > 0) { await wait(100) } // Wait until no longer busy   
+    try {
+        let result = ddcci._setHighLevelBrightness(monitor, value)
+        return result
+    } catch (e) {
+        console.log(e)
         return false
     }
 }
@@ -1004,6 +1286,7 @@ testDDCCIMethods = async () => {
         wait(50)
         vcpCache = {}
         monitorReports = {}
+        monitorReportsRaw = {}
         ddcci._clearDisplayCache()
     
         startTime = process.hrtime.bigint()
@@ -1048,6 +1331,7 @@ testDDCCIMethods = async () => {
 
     vcpCache = {}
     monitorReports = {}
+    monitorReportsRaw = {}
     ddcci._clearDisplayCache()
     
     return fastIsFine

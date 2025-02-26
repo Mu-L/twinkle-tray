@@ -1,12 +1,12 @@
 {
   "targets": [
     {
-      "target_name": "setwindowpos",
+      "target_name": "windows-hdr",
       "cflags!": [ "-fno-exceptions" ],
       "cflags_cc!": [ "-fno-exceptions" ],
       "conditions": [
         ["OS=='win'", {
-      	  "sources": [ "setwindowpos.cc" ]
+      	  "sources": [ "windows-hdr.cc" ]
       	}],
       ],
       "include_dirs": [

@@ -3,9 +3,13 @@ import Slider from "./Slider"
 
 export default function MonitorInfo(props) {
     const { monitor, name } = props
-    const [contrast, setContrast] = useState(monitor?.features?.contrast ? monitor?.features?.contrast[0] : 50)
-    const [volume, setVolume] = useState(monitor?.features?.volume ? monitor?.features?.volume[0] : 50)
-    const [powerState, setPowerState] = useState(monitor?.features?.powerState ? monitor?.features?.powerState[0] : 50)
+    const [brightness, setBrightness] = useState(monitor?.features?.["0x10"] ? monitor?.features?.["0x10"][0] : 50)
+    const [contrast, setContrast] = useState(monitor?.features?.["0x12"] ? monitor?.features?.["0x12"][0] : 50)
+    const [volume, setVolume] = useState(monitor?.features?.["0x62"] ? monitor?.features?.["0x62"][0] : 50)
+    const [powerState, setPowerState] = useState(monitor?.features?.["0xD6"] ? monitor?.features?.["0xD6"][0] : 50)
+    const [sdr, setSDR] = useState(monitor.sdrLevel >= 0 ? monitor.sdrLevel : 50)
+    const [manualVCP, setManualVCP] = useState("")
+    const [manualValue, setManualValue] = useState("")
 
     let extraHTML = []
 
@@ -23,32 +27,62 @@ export default function MonitorInfo(props) {
         )
     }
 
-    if (monitor?.features?.contrast) {
+    // Brightness
+    if (monitor?.features?.["0x10"]) {
+        extraHTML.push(
+            <div className="feature-row" key="brightness">
+                <div className="feature-icon"><span className="icon vfix">&#xE706;</span></div>
+                <Slider type="brightness" monitorID={monitor.id} level={brightness} monitorName={monitor.name} monitortype={monitor.type} onChange={val => { setBrightness(val); setVCP(monitor.id, 0x10, val * (monitor.features["0x10"][1] / 100)) }} scrolling={false} />
+            </div>
+        )
+    }
+
+    // Contrast
+    if (monitor?.features?.["0x12"]) {
         extraHTML.push(
             <div className="feature-row" key="contrast">
                 <div className="feature-icon"><span className="icon vfix">&#xE793;</span></div>
-                <Slider type="contrast" monitorID={monitor.id} level={contrast} monitorName={monitor.name} monitortype={monitor.type} onChange={val => { setContrast(val); setVCP(monitor.id, 0x12, val * (monitor.features.contrast[1] / 100)) }} scrolling={false} />
+                <Slider type="contrast" monitorID={monitor.id} level={contrast} monitorName={monitor.name} monitortype={monitor.type} onChange={val => { setContrast(val); setVCP(monitor.id, 0x12, val * (monitor.features["0x12"][1] / 100)) }} scrolling={false} />
             </div>
         )
     }
 
-    if (monitor?.features?.volume) {
+    // Volume
+    if (monitor?.features?.["0x62"]) {
         extraHTML.push(
             <div className="feature-row" key="volume">
                 <div className="feature-icon"><span className="icon vfix">&#xE767;</span></div>
-                <Slider type="volume" monitorID={monitor.id} level={volume} monitorName={monitor.name} monitortype={monitor.type} onChange={val => { setVolume(val); setVCP(monitor.id, 0x62, val * (monitor.features.volume[1] / 100)) }} scrolling={false} />
+                <Slider type="volume" monitorID={monitor.id} level={volume} monitorName={monitor.name} monitortype={monitor.type} onChange={val => { setVolume(val); setVCP(monitor.id, 0x62, val * (monitor.features["0x62"][1] / 100)) }} scrolling={false} />
             </div>
         )
     }
 
-    if (monitor?.features?.powerState) {
+    // Power State
+    if (monitor?.features?.["0xD6"]) {
         extraHTML.push(
             <div className="feature-row" key="powerState">
                 <div className="feature-icon"><span className="icon vfix">&#xE7E8;</span></div>
-                <Slider type="powerState" monitorID={monitor.id} level={powerState} monitorName={monitor.name} max={monitor.features.powerState[1]} monitortype={monitor.type} onChange={val => { setPowerState(val); setVCP(monitor.id, 0xD6, val) }} scrolling={false} />
+                <Slider type="powerState" monitorID={monitor.id} level={powerState} monitorName={monitor.name} max={monitor.features["0xD6"][1]} monitortype={monitor.type} onChange={val => { setPowerState(val); setVCP(monitor.id, 0xD6, val) }} scrolling={false} />
             </div>
         )
     }
+
+    // Manual VCP
+    extraHTML.push(
+        <div className="manual-vcp-row" key="manual">
+            <input placeholder="VCP code" value={manualVCP} onChange={e => { setManualVCP(e.target.value) }} />
+            <input placeholder="Value" value={manualValue} onChange={e => { setManualValue(e.target.value) }} />
+            <a className="button" onClick={() => setVCP(monitor.id, parseInt(manualVCP), parseInt(manualValue))}>Send VCP</a>
+        </div>
+    )
+
+    // SDR test
+    extraHTML.push(
+        <div className="feature-row" key="sdrLevel">
+            <div className="feature-icon">SDR</div>
+            <Slider type="sdrLevel" monitorID={monitor.id} level={sdr} monitorName={monitor.name} max={100} monitortype={monitor.type} onChange={val => { setSDR(val); setSDRBrightness(monitor.id, val) }} scrolling={false} />
+        </div>
+    )
 
     return (
         <div key={monitor.key}>
@@ -56,7 +90,7 @@ export default function MonitorInfo(props) {
             <div className="sectionSubtitle"><div className="icon">&#xE7F4;</div><div>{monitor.name}</div></div>
             <p>Name: <b>{name}</b>
                 <br />Internal name: <b>{monitor.hwid[1]}</b>
-                <br />Communication Method: {getDebugMonitorType(monitor.type)}
+                <br />Communication Method: {getDebugMonitorType((monitor.type === "ddcci" && monitor.highLevelSupported?.brightness ? "ddcci-hl" : monitor.type))}
                 <br />Current Brightness: <b>{(monitor.type == "none" ? "Not supported" : monitor.brightness)}</b>
                 <br />Max Brightness: <b>{(monitor.type !== "ddcci" ? "Not supported" : monitor.brightnessMax)}</b>
                 <br />Brightness Normalization: <b>{(monitor.type == "none" ? "Not supported" : monitor.min + " - " + monitor.max)}</b>
@@ -76,13 +110,26 @@ function setVCP(monitor, code, value) {
     }))
 }
 
+function setSDRBrightness(monitor, value) {
+    window.dispatchEvent(new CustomEvent("set-sdr-brightness", {
+        detail: {
+            monitor,
+            value
+        }
+    }))
+}
+
 function getDebugMonitorType(type) {
     if (type == "none") {
         return (<><b>None</b> <span className="icon red vfix">&#xEB90;</span></>)
     } else if (type == "ddcci") {
         return (<><b>DDC/CI</b> <span className="icon green vfix">&#xE73D;</span></>)
+    } else if (type == "ddcci-hl") {
+        return (<><b>DDC/CI (HL)</b> <span className="icon green vfix">&#xE73D;</span></>)
     } else if (type == "wmi") {
         return (<><b>WMI</b> <span className="icon green vfix">&#xE73D;</span></>)
+    } else if (type == "studio-display") {
+        return (<><b>Studio Display</b> <span className="icon green vfix">&#xE73D;</span></>)
     } else {
         return (<><b>Unknown ({type})</b> <span className="icon red vfix">&#xEB90;</span></>)
     }

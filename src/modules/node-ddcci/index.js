@@ -9,16 +9,21 @@ module.exports = {
   , _getVCP: ddcci.getVCP
   , _setVCP: ddcci.setVCP
   , _saveCurrentSettings: ddcci.saveCurrentSettings
+  , _getHighLevelBrightness: ddcci.getHighLevelBrightness
+  , _setHighLevelBrightness: ddcci.setHighLevelBrightness
+  , _getHighLevelContrast: ddcci.getHighLevelContrast
+  , _setHighLevelContrast: ddcci.setHighLevelContrast
   , _getAllMonitors: ddcci.getAllMonitors
   , _clearDisplayCache: ddcci.clearDisplayCache
   , _setLogLevel: ddcci.setLogLevel
-  , _refresh: (method = "accurate", usePreviousResults = true) => ddcci.refresh(method, usePreviousResults)
-  , getMonitorList: (method = "accurate", usePreviousResults = true) => { 
-        ddcci.refresh(method, usePreviousResults);
+  , _parseCapabilitiesString: parseCapabilitiesString
+  , _refresh: (method = "accurate", usePreviousResults = true, checkHighLevel = true) => ddcci.refresh(method, usePreviousResults, checkHighLevel)
+  , getMonitorList: (method = "accurate", usePreviousResults = true, checkHighLevel = true) => { 
+        ddcci.refresh(method, usePreviousResults, checkHighLevel);
         return ddcci.getMonitorList();
     }
-  , getAllMonitors: (method = "accurate", usePreviousResults = true) => { 
-        ddcci.refresh(method, usePreviousResults);
+  , getAllMonitors: (method = "accurate", usePreviousResults = true, checkHighLevel = true) => { 
+        ddcci.refresh(method, usePreviousResults, checkHighLevel);
         const monitors = ddcci.getAllMonitors();
         for(const monitor of monitors) {
             if(monitor.result && monitor.result != "ok" && monitor.result != "invalid") {
@@ -68,8 +73,11 @@ module.exports = {
     // Returns an array where keys are valid VCP codes and the keys are an array of accepted values.
     // If the array of accepted values is empty, the VCP code either accepts a range of values or no values. Use getVCP to determine the range, if any.
   , getCapabilities (monitorId) {
-    let report = ddcci.getCapabilitiesString(monitorId);
-    return parseCapabilitiesString(report);
+        let report = ddcci.getCapabilitiesString(monitorId);
+        return parseCapabilitiesString(report);
+    }
+  , getCapabilitiesRaw (monitorId) {
+        return ddcci.getCapabilitiesString(monitorId);
   }
 };
 
@@ -96,34 +104,57 @@ function parseCapabilitiesString(report = "") {
             position++;
         }
 
-        // Split up remaining string so we can extract accepted values from code list
-        let codesSplit = output.replaceAll('(','|').replaceAll(')', '|').split('|');
+        // Strip out unnecessary characters
+        output = output.replaceAll('\0', '').replaceAll(' ', '').trim();
 
-        // Loop through the above array, alternating between parsing VCP codes and accepted values as needed
-        const codeList = [];
-        let lastCode;
-        let isCodes = true;
-        for(const set of codesSplit) {
-            if(isCodes) {
-                // Extracting VCP codes
-                const split = set.trim().split(' ');
-                for(const code of split) {
-                    codeList[`0x${code.toUpperCase()}`] = [];
-                    lastCode = `0x${code.toUpperCase()}`;
-                }
-                isCodes = false;
-            } else {
-                // Extracting accepted values for last VCP code
-                for(const value of set.trim().split(' ')) {
-                    if(value.length > 0) {
-                        codeList[lastCode].push(parseInt(`0x${value}`));
+        // Iterate through the above string, alternating between parsing VCP codes and accepted values as needed
+        const codeList = {};
+
+        let pos = 0
+        while(pos < output.length){
+            const cur = output[pos]
+            pos++
+
+            // Check for VCP codes
+            if(cur !== "(") {
+                let vcpCode = `${cur}${output[pos]}`
+                const vcpValues = []
+                pos++
+                
+                // Check for defined values
+                if(output[pos] == "(") {
+                    pos++
+                    let depth = 0
+                    while((output[pos] != ")" && depth == 0) && pos < output.length) {
+
+                        // Check for subdata
+                        // I don't know what to do with this, so we'll just read through and ignore it.
+                        if(output[pos] == "(") {
+                            pos++
+                            depth++
+                            while(depth > 0 && pos < output.length) {
+                                if(output[pos] == "(") {
+                                    depth++
+                                } else if(output[pos] == ")") {
+                                    depth--
+                                }
+                                pos++
+                            }
+                        } else {
+                            // Push defined value to list
+                            vcpValues.push(parseInt(`0x${output[pos]}${output[pos+1]}`))
+                            pos += 2
+                        }
+                        
                     }
-                    
+                    pos++
                 }
-                isCodes = true;
+                // Add VCP code with defined values (if found)
+                codeList[`0x${vcpCode.toUpperCase()}`] = vcpValues
             }
         }
-        return codeList;
+
+        return codeList
     }
-    return [];
+    return false;
 }
